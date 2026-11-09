@@ -1,0 +1,41 @@
+'use strict';
+(function(root){
+ const clamp=(v,a=0,b=1)=>Math.max(a,Math.min(b,v));
+ let taste={votes:{},hidden:[]};
+ const norm=s=>String(s||'').toLowerCase().replace(/[0-9]+/g,' ').replace(/[^a-z]+/g,' ').trim();
+ function restore(value){taste={votes:{},hidden:[]};if(!value||typeof value!=='object')return;for(const key of Object.keys(value.votes||{}).slice(-200)){const v=value.votes[key];if(/^[a-z0-9]{1,80}$/.test(key)&&[-1,1].includes(v?.value))taste.votes[key]={value:v.value,kind:['photo','art','space','artist'].includes(v.kind)?v.kind:'photo',tags:(v.tags||[]).filter(t=>typeof t==='string'&&/^[a-z]{1,32}$/.test(t)).slice(0,20),temperature:clamp(Number(v.temperature)||0,-1,1),brightness:clamp(Number(v.brightness)||.4)};}taste.hidden=[...new Set((value.hidden||[]).filter(k=>typeof k==='string'&&/^[a-z0-9]{1,80}$/.test(k)))].slice(-2000);}
+ function vote(image,value){if(!image)return;if(value==='hide'){if(!taste.hidden.includes(image.key)){if(taste.hidden.length>=2000)return false;taste.hidden.push(image.key);}delete taste.votes[image.key];return true;}if(value==='reset'){restore({});return;}if(![-1,1].includes(value))return;delete taste.votes[image.key];taste.votes[image.key]={value,kind:image.kind,tags:image.tags.slice(0,20),temperature:image.visual?.temperature||0,brightness:image.visual?.brightness??.4};while(Object.keys(taste.votes).length>200)delete taste.votes[Object.keys(taste.votes)[0]];}
+ const authorNorm=value=>String(value||'').normalize('NFKD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^\p{L}\p{N}]+/gu,' ').trim();
+ function creator(image){if(!['photo','art'].includes(image.kind))return '';const value=authorNorm(image.creatorKey||image.artist);return value.length>=3&&!/^(own work|unknown|anonymous|public domain|various|not provided)$/.test(value)?value.slice(0,120):'';}
+ function places(image){if(Array.isArray(image.placeKeys))return image.placeKeys;const evidence=(image.title||'')+' '+(image.caption||''),found=[];for(const match of evidence.matchAll(/\b(?:in|of|over|near|from|at)\s+([A-Z][\p{L}'-]+(?:\s+[A-Z][\p{L}'-]+){0,3})/gu)){const name=authorNorm(match[1]);if(name.length>=4&&!/\b(the|a|an|own|national|park|mountain|mountains|sea|water|night|sunset|sunrise|landscape|city|flickr|nasa|wikimedia|commons|earth|jupiter|saturn)\b/.test(name)&&!found.includes(name))found.push(name);if(found.length>=6)break;}return found;}
+ function artworkSubject(image){
+  if(image.kind!=='art'&&!(image.remote&&image.kind==='photo'))return true;
+  const title=image.title||'',evidence=title+' '+(image.caption||'');
+  if(/\b(artist at work|painter at work|painting class|people painting|art studio|gallery interior|gallery opening|exhibition opening|vernissage|artist interview|painter portrait|artist portrait|surrounded by (?:colorful )?paintings|adds finishing touches|artist working)\b/i.test(evidence))return false;
+  const namedSubject=/^([\p{Lu}][\p{L}'’.-]+(?:\s+[\p{Lu}][\p{L}'’.-]+){1,5})\s+(?:at|during|visiting|presenting)\s/u.exec(title);
+  const name=namedSubject?.[1].replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+  return !(name&&new RegExp(name+'\\s+(?:during|visiting|presenting)\\b.{0,120}\\b(?:exhibition|solo show|gallery)\\b','isu').test(evidence));
+ }
+ function series(image){if(image.seriesKey)return image.seriesKey;const title=String(image.title||'').replace(/\.(?:jpe?g|png|webp)$/i,'').replace(/_/g,' '),base=title.replace(/(?:\s*[-–—]\s*|\s+)\d{1,3}\s*$/,'').trim();if(base===title||base.length<12)return '';return authorNorm(image.artistId||image.artist||image.source||'')+'|'+authorNorm(base);}
+ function allowed(image){return !taste.hidden.includes(image.key)&&image.visual?.accepted!==false&&artworkSubject(image);}
+ function diversity(image,history,images){const author=creator(image),location=places(image),group=series(image);const creatorRepeat=!!author&&history.slice(-8).some(k=>images[k]&&creator(images[k])===author);const placeRepeat=image.kind==='photo'&&location.length>0&&history.slice(-10).some(k=>images[k]?.kind==='photo'&&places(images[k]).some(p=>location.includes(p)));const seriesRepeat=!!group&&history.slice(image.kind==='artist'?-10:-60).some(k=>images[k]&&series(images[k])===group);return{creatorRepeat,placeRepeat,seriesRepeat,sourcePenalty:(creatorRepeat?.22:0)+(placeRepeat?.16:0)+(seriesRepeat?.3:0)};}
+ function tasteFit(image){let signal=0,weight=0;for(const [key,v]of Object.entries(taste.votes)){if(key===image.key){signal+=v.value*2;weight+=2;continue;}const shared=image.tags.filter(t=>v.tags.includes(t)).length/Math.max(3,Math.min(image.tags.length,v.tags.length));const similarity=.6*shared+.2*(image.kind===v.kind?1:0)+.2*(1-Math.min(1,Math.abs((image.visual?.temperature||0)-v.temperature)*3));if(similarity>.25){signal+=v.value*similarity;weight+=similarity;}}return weight?clamp(signal/Math.max(3,weight),-1,1)*.14:0;}
+ function scene(image){const tags=image.tags||[];if(image.kind==='space')return 'space';if(image.kind==='art')return 'art';for(const tag of ['city','architecture','forest','mountain','desert','flowers','water','road','rural'])if(tags.includes(tag))return tag;return image.kind;}
+ function measured(image){const v=image?.visual;return !!v&&Number.isFinite(v.brightness)&&Array.isArray(v.palette)&&v.palette.length===8&&v.palette.every(n=>Number.isFinite(n)&&n>=0);}
+ function paletteFit(a,b){const x=a?.visual,y=b?.visual;if(!measured(a)||!measured(b))return .5;let overlap=0;const sx=x.palette.reduce((a,b)=>a+b,0),sy=y.palette.reduce((a,b)=>a+b,0);if(sx&&sy)for(let i=0;i<8;i++)overlap+=Math.min(x.palette[i]/sx,y.palette[i]/sy);else overlap=sx===sy?1:.5;return .6*overlap+.25*(1-Math.min(1,Math.abs(x.brightness-y.brightness)))+.15*(1-Math.min(1,Math.abs((x.saturation??.3)-(y.saturation??.3))));}
+ function sequence(image,history,images,state={}){const last=Object.prototype.hasOwnProperty.call(state,'previous')?state.previous:images[history[history.length-1]],tail=history.slice(-8).map(k=>images[k]).filter(Boolean),reset=!!state.reset;let repetition=0;for(const [i,p]of tail.entries()){const decay=(i+1)/tail.length;if(norm(image.title)===norm(p.title))repetition+=.3*decay;else if(scene(image)===scene(p))repetition+=.035*decay;}
+  const known=measured(image)&&measured(last),lastPalette=known?paletteFit(image,last):null,trail=(state.recent||tail).slice(-3).filter(measured),running=known&&!reset&&trail.length?trail.reduce((n,p)=>n+paletteFit(image,p),0)/trail.length:lastPalette;
+  const palette=known?.7*lastPalette+.3*running:.5,brightness=known?Math.abs(last.visual.brightness-image.visual.brightness):0;
+  return{continuity:known?.18*(palette-.5)*(reset?.2:1):0,scenePenalty:Math.min(.32,repetition),brightnessPenalty:Math.max(0,brightness-.22)*(reset?.04:.2),palette,lastPalette,runningPalette:running,colourKnown:known,reset,brightnessDelta:known?brightness:null};
+ }
+ function quality(image){return clamp((image.visual?.quality??.74)+.07*(image.sourceQuality||0));}
+ function evening(settings,date=new Date()){if(settings.roomLight==='evening')return true;if(settings.roomLight==='natural')return false;const minute=date.getHours()*60+date.getMinutes();return minute>=16*60+30||minute<7*60;}
+ function ambientBias(image,settings,date=new Date()){if(!evening(settings,date))return 0;const v=image.visual||{},brightness=v.brightness??.45,energy=v.energy??image.energy??.4;return -.2*Math.max(0,brightness-.45)-.13*Math.max(0,energy-.45)-.04*Math.max(0,(v.clutter||0)-.1)+.02*Math.max(0,.45-brightness);}
+ function compositionPenalty(image,ctx,settings){
+  if(image.kind!=='photo'||!Number.isFinite(image.visual?.clutter))return 0;
+  const quiet=(ctx.profile.energy??.5)<=.5||evening(settings),clutter=image.visual.clutter;
+  return Math.min(.12,(quiet?.26:.08)*Math.max(0,clutter-(quiet?.22:.45))+(quiet&&clutter>.3?.05*Math.max(0,(image.visual.saturation??.3)-.75):0));
+ }
+ function hold(ctx,settings,playing=true,date=new Date()){if(settings.paceMode==='fixed')return settings.interval||60;const energy=ctx.profile.energy??.4;return Math.round(clamp(100-55*energy+(evening(settings,date)?10:0),45,110));}
+ root.ScapesCuration={restore,vote,reset:()=>restore({}),snapshot:()=>JSON.parse(JSON.stringify(taste)),allowed,tasteFit,scene,sequence,quality,evening,ambientBias,compositionPenalty,hold,creator,places,diversity,series,paletteFit,measured};
+})(window);

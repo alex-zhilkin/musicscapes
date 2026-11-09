@@ -1,0 +1,13 @@
+*.apk
+*.aab
+*.keystore
+*.jks
+.env
+.env.*
+artist-source-keys.json
+*logs*
+*.jsonl
+*.sqlite*
+build/
+.idea/
+local.properties
